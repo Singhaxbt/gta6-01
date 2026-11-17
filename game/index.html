@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SOLMAR SUNSET — an open-world crime game</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a22;
+    font-family: 'Segoe UI', system-ui, sans-serif; color: #fff; }
+  #game-canvas { position: fixed; inset: 0; }
+  #game-canvas canvas { display: block; }
+  .hidden { display: none !important; }
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+  #minimap { position: absolute; top: 14px; left: 14px; width: 180px; height: 180px;
+    border-radius: 50%; border: 3px solid rgba(255,255,255,.75);
+    box-shadow: 0 0 0 3px rgba(0,0,0,.35); background: #20242a; }
+  #stars { position: absolute; top: 14px; right: 16px; font-size: 30px; letter-spacing: 4px;
+    color: #fff; text-shadow: 0 2px 6px rgba(0,0,0,.8); }
+  #money { position: absolute; top: 52px; right: 18px; font-size: 26px; font-weight: 700;
+    color: #7dff8a; text-shadow: 0 2px 6px rgba(0,0,0,.8); }
+  #objective { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    font-size: 17px; font-weight: 600; text-align: center; max-width: 560px;
+    text-shadow: 0 2px 6px rgba(0,0,0,.9); background: rgba(0,0,0,.35);
+    padding: 6px 14px; border-radius: 8px; }
+  #timer { position: absolute; top: 56px; left: 50%; transform: translateX(-50%);
+    font-size: 22px; font-weight: 800; color: #ffc93c; text-shadow: 0 2px 6px rgba(0,0,0,.9); }
+  #health { position: absolute; left: 16px; bottom: 18px; width: 220px; }
+  #health-text { font-size: 13px; font-weight: 700; letter-spacing: 1px; margin-bottom: 4px;
+    text-shadow: 0 2px 4px rgba(0,0,0,.9); }
+  #health-bar { height: 14px; background: rgba(0,0,0,.55); border: 2px solid rgba(255,255,255,.7);
+    border-radius: 7px; overflow: hidden; }
+  #health-fill { height: 100%; width: 100%; background: linear-gradient(90deg, #37d67a, #7dff8a);
+    transition: width .2s; }
+  #speed { position: absolute; right: 20px; bottom: 16px; text-align: right;
+    text-shadow: 0 2px 6px rgba(0,0,0,.9); }
+  #speed span:first-child { font-size: 44px; font-weight: 800; line-height: 1; }
+  #speed-label { font-size: 12px; letter-spacing: 2px; color: #ffd27a; }
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px;
+    transform: translate(-50%, -50%); }
+  #crosshair::before, #crosshair::after { content: ''; position: absolute; background: #fff;
+    box-shadow: 0 0 3px #000; }
+  #crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
+  #crosshair::after { left: 0; top: 10px; width: 22px; height: 2px; }
+  #toasts { position: absolute; top: 100px; left: 50%; transform: translateX(-50%);
+    display: flex; flex-direction: column; align-items: center; gap: 6px; width: 640px; }
+  .toast { background: rgba(20,20,28,.85); border-left: 4px solid #ffc93c; padding: 8px 16px;
+    border-radius: 6px; font-size: 15px; text-align: center; box-shadow: 0 2px 10px rgba(0,0,0,.5); }
+  #hint { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+    font-size: 13px; color: rgba(255,255,255,.85); text-shadow: 0 1px 4px rgba(0,0,0,.9);
+    background: rgba(0,0,0,.3); padding: 5px 12px; border-radius: 6px; white-space: nowrap; }
+  .menu { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center;
+    justify-content: center; background: linear-gradient(160deg, rgba(20,20,40,.82), rgba(120,50,20,.78)); }
+  .menu-card { max-width: 620px; padding: 36px 44px; text-align: center;
+    background: rgba(10,10,18,.72); border: 1px solid rgba(255,201,60,.5); border-radius: 16px;
+    box-shadow: 0 12px 60px rgba(0,0,0,.6); }
+  .menu-card h1 { font-size: 52px; letter-spacing: 4px; color: #ffc93c;
+    text-shadow: 0 0 24px rgba(255,180,40,.6); margin-bottom: 4px; }
+  .menu-card h2 { font-size: 20px; font-weight: 400; color: #ffd27a; margin-bottom: 18px; }
+  .menu-card p { font-size: 15px; line-height: 1.55; color: #eee; margin-bottom: 14px; }
+  .controls { font-size: 13.5px; line-height: 1.7; color: #cdd6e4; margin-bottom: 20px; }
+  .controls b { color: #ffc93c; }
+  button { pointer-events: auto; cursor: pointer; font-size: 18px; font-weight: 700;
+    letter-spacing: 1px; color: #1a1a22; background: linear-gradient(180deg, #ffd76a, #f2a93b);
+    border: none; border-radius: 10px; padding: 13px 34px; margin: 4px;
+    box-shadow: 0 4px 0 #a86f14, 0 6px 18px rgba(0,0,0,.45); }
+  button:hover { filter: brightness(1.08); }
+  button:active { transform: translateY(3px); box-shadow: 0 1px 0 #a86f14; }
+  #end-title { font-size: 64px; letter-spacing: 8px; margin-bottom: 8px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.min.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="game-canvas"></div>
+
+<div id="hud" class="hidden">
+  <canvas id="minimap" width="180" height="180"></canvas>
+  <div id="stars">☆☆☆☆☆</div>
+  <div id="money">$200</div>
+  <div id="objective">Press M for work.</div>
+  <div id="timer"></div>
+  <div id="health">
+    <div id="health-text">HEALTH 100</div>
+    <div id="health-bar"><div id="health-fill"></div></div>
+  </div>
+  <div id="speed"><span id="speed">0</span><div id="speed-label">KM/H — ON FOOT</div></div>
+  <div id="crosshair"></div>
+  <div id="toasts"></div>
+  <div id="hint"></div>
+</div>
+
+<div id="menu-start" class="menu">
+  <div class="menu-card">
+    <h1>SOLMAR SUNSET</h1>
+    <h2>An open-world crime game in the sun-soaked city of Solmar</h2>
+    <p>Dario "Dare" Fontana runs packages for Marisol Vega — and the Solmar PD
+    is always one bad turn away. Steal a car, lose the heat, and finish all
+    three jobs: <b>First Run</b> ($300), <b>Hot Property</b> ($600) and
+    <b>Heat Run</b> ($1,200).</p>
+    <div class="controls">
+      <b>W A S D</b> move / drive &nbsp;·&nbsp; <b>Shift</b> run &nbsp;·&nbsp; <b>E</b> steal / exit car<br>
+      <b>Mouse click / F</b> shoot &nbsp;·&nbsp; <b>Space</b> handbrake &nbsp;·&nbsp; <b>M</b> start mission<br>
+      <b>N</b> mute &nbsp;·&nbsp; <b>Esc</b> pause &nbsp;·&nbsp; Getting busted or wasted costs $200
+    </div>
+    <button id="btn-start">START THE ENGINE</button>
+  </div>
+</div>
+
+<div id="menu-pause" class="menu hidden">
+  <div class="menu-card">
+    <h1 style="font-size:40px">PAUSED</h1>
+    <p>Solmar waits for no one — except right now.</p>
+    <button id="btn-resume">RESUME</button>
+    <button id="btn-quit">QUIT TO MENU</button>
+  </div>
+</div>
+
+<div id="menu-end" class="menu hidden">
+  <div class="menu-card">
+    <h1 id="end-title">WASTED</h1>
+    <p id="end-text"></p>
+    <button id="btn-respawn">RESPAWN AT SOLMAR GENERAL</button>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
