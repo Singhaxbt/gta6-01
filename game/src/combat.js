@@ -1,193 +1,203 @@
-// combat.js — pistol with raycast shooting, tracer, muzzle flash and the
-// wanted consequences of pulling the trigger.
+// combat.js — pistol / SMG / shotgun with different range, damage and fire
+// rate; enemies who take cover, peek and shoot back; muzzle flash, tracers,
+// damage sparks and hit reactions. Player health + armor.
 import * as THREE from 'three';
-import { killPedestrian } from './traffic.js';
+import { makeRng } from './rng.js';
 
-export function createCombat(scene) {
-  const tracerMat = new THREE.LineBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0 });
-  const tracerGeo = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(), new THREE.Vector3(),
-  ]);
-  const tracer = new THREE.Line(tracerGeo, tracerMat);
-  tracer.visible = false;
-  tracer.frustumCulled = false;
-  scene.add(tracer);
-  const flash = new THREE.Mesh(
-    new THREE.SphereGeometry(0.22, 8, 6),
-    new THREE.MeshBasicMaterial({ color: 0xffd27a, transparent: true, opacity: 0 }),
-  );
-  flash.visible = false;
-  scene.add(flash);
-  return {
-    tracer,
-    flash,
-    cooldown: 0,
-    tracerT: 0,
-    flashT: 0,
-    shotsFired: 0,
-    lastShotPos: null,
-  };
-}
+export const WEAPONS = {
+  pistol: { name: 'PISTOL', damage: 34, range: 60, rate: 0.32, spread: 0.02, mag: Infinity, auto: false, color: 0xffe082 },
+  smg: { name: 'SMG', damage: 16, range: 45, rate: 0.09, spread: 0.06, mag: 32, auto: true, color: 0xffd54f },
+  shotgun: { name: 'SHOTGUN', damage: 22, range: 26, rate: 0.85, spread: 0.16, mag: 6, auto: false, pellets: 6, color: 0xff8a65 },
+};
 
-/**
- * Fire one shot from the camera through the crosshair. Returns a hit report
- * or null. Raycasts against pedestrians, police cars, traffic cars and
- * parked cars (buildings block the shot via a cheap AABB test).
- */
-export function shoot(G) {
-  const combat = G.combat;
-  if (combat.cooldown > 0 || G.mode !== 'playing') return null;
-  combat.cooldown = 0.25;
-  combat.shotsFired++;
-  G.audio.gunshot();
-  const cam = G.camera;
-  const origin = cam.position.clone();
-  // Aim from the camera toward a point 8 m ahead of Dario (or the car) at
-  // torso height, using the CURRENT heading — not the camera's last frame,
-  // which lags a turn by a frame. The ray then crosses torso height
-  // (y ≈ 1.2) through the whole 2–8 m engagement band.
-  const base = G.player.onFoot ? G.player.pos : G.car.pos;
-  const heading = G.player.onFoot ? G.player.heading : G.car.heading;
-  const aimPoint = new THREE.Vector3(
-    base.x + Math.sin(heading) * 8,
-    1.2,
-    base.z - Math.cos(heading) * 8,
-  );
-  const dir = aimPoint.clone().sub(origin).normalize();
-  const muzzle = G.player.onFoot
-    ? new THREE.Vector3(G.player.pos.x, 1.25, G.player.pos.z)
-    : new THREE.Vector3(G.car.pos.x, 1.2, G.car.pos.z);
-  const maxRange = 90;
-  let bestT = maxRange;
-  let bestKind = null;
-  let bestTarget = null;
-  const tmp = new THREE.Vector3();
-
-  const testSphere = (center, radius, kind, target) => {
-    tmp.copy(center).sub(origin);
-    const tca = tmp.dot(dir);
-    if (tca < 0) return;
-    const d2 = tmp.lengthSq() - tca * tca;
-    if (d2 > radius * radius) return;
-    const t = tca - Math.sqrt(radius * radius - d2);
-    if (t < bestT) {
-      bestT = t;
-      bestKind = kind;
-      bestTarget = target;
-    }
-  };
-
-  // Buildings block the shot: test the ray against their AABBs first.
-  const rayBox = (b) => {
-    let tmin = 0;
-    let tmax = bestT;
-    const o = [origin.x, 0, origin.z];
-    const d = [dir.x, dir.y, dir.z];
-    const mn = [b.minX, 0, b.minZ];
-    const mx = [b.maxX, 30, b.maxZ];
-    for (let i = 0; i < 3; i++) {
-      if (Math.abs(d[i]) < 1e-8) {
-        if (o[i] < mn[i] || o[i] > mx[i]) return;
-      } else {
-        let t1 = (mn[i] - o[i]) / d[i];
-        let t2 = (mx[i] - o[i]) / d[i];
-        if (t1 > t2) { const t = t1; t1 = t2; t2 = t; }
-        tmin = Math.max(tmin, t1);
-        tmax = Math.min(tmax, t2);
-        if (tmin > tmax) return;
+export class Enemy {
+  constructor(x, z, scene, rng, kind) {
+    this.kind = kind || 'thug';
+    this.pos = new THREE.Vector3(x, 0, z);
+    this.health = kind === 'boss' ? 220 : 100;
+    this.maxHealth = this.health;
+    this.speed = kind === 'boss' ? 2.6 : 3.4;
+    this.shootCooldown = rng.range(0.5, 1.5);
+    this.cover = null;
+    this.state = 'chase'; // chase | cover | peek
+    this.stateT = 0;
+    this.alive = true;
+    this.flashT = 0;
+    const g = new THREE.Group();
+    const shirt = kind === 'boss' ? 0x111111 : rng.pick([0x7b1fa2, 0x37474f, 0x6d4c41, 0x263238]);
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.8, 0.36),
+      new THREE.MeshLambertMaterial({ color: shirt }));
+    body.position.y = 1.0; g.add(body);
+    const vest = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.5, 0.4),
+      new THREE.MeshLambertMaterial({ color: 0x1b1b1b }));
+    vest.position.y = 1.05; g.add(vest);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 8),
+      new THREE.MeshLambertMaterial({ color: 0xc68642 }));
+    head.position.y = 1.62; g.add(head);
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.21, 0.21, 0.08, 10),
+      new THREE.MeshLambertMaterial({ color: kind === 'boss' ? 0xd21f3c : 0x222222 }));
+    cap.position.y = 1.76; g.add(cap);
+    const gun = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.12, 0.55),
+      new THREE.MeshLambertMaterial({ color: 0x111111 }));
+    gun.position.set(0.3, 1.15, 0.3); g.add(gun);
+    const legMat = new THREE.MeshLambertMaterial({ color: 0x212121 });
+    this.legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.6, 0.22), legMat);
+    this.legL.position.set(-0.16, 0.3, 0);
+    this.legR = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.6, 0.22), legMat);
+    this.legR.position.set(0.16, 0.3, 0);
+    g.add(this.legL, this.legR);
+    this.mesh = g;
+    this.mesh.position.copy(this.pos);
+    // Health bar sprite above the head
+    const barGeo = new THREE.PlaneGeometry(1.1, 0.12);
+    this.barMat = new THREE.MeshBasicMaterial({ color: 0xff3333 });
+    this.bar = new THREE.Mesh(barGeo, this.barMat);
+    this.bar.position.y = 2.1;
+    this.mesh.add(this.bar);
+    scene.add(this.mesh);
+    this.scene = scene;
+  }
+  damage(amount, fromPos) {
+    this.health -= amount;
+    this.flashT = 0.12;
+    if (this.health <= 0) { this.alive = false; this.mesh.visible = false; return true; }
+    // Getting shot makes them duck for cover.
+    this.state = 'cover'; this.stateT = 0;
+    return false;
+  }
+  update(dt, playerPos, city, time, rng) {
+    if (!this.alive) return;
+    this.stateT += dt;
+    this.flashT = Math.max(0, this.flashT - dt);
+    const dx = playerPos.x - this.pos.x, dz = playerPos.z - this.pos.z;
+    const dist = Math.hypot(dx, dz);
+    if (this.state === 'cover') {
+      if (!this.cover) {
+        // Nearest cover point that is not between us and the player.
+        let best = null, bestD = 1e9;
+        for (const c of city.coverPoints) {
+          const d = Math.hypot(c.x - this.pos.x, c.z - this.pos.z);
+          if (d < bestD) { bestD = d; best = c; }
+        }
+        this.cover = best || { x: this.pos.x, z: this.pos.z };
       }
+      const cx = this.cover.x - this.pos.x, cz = this.cover.z - this.pos.z;
+      const cd = Math.hypot(cx, cz);
+      if (cd > 1.5) {
+        this.angle = Math.atan2(cx, cz);
+        this.pos.x += Math.sin(this.angle) * this.speed * 1.3 * dt;
+        this.pos.z += Math.cos(this.angle) * this.speed * 1.3 * dt;
+      } else if (this.stateT > 1.6) { this.state = 'peek'; this.stateT = 0; }
+    } else {
+      if (dist > 14) {
+        this.angle = Math.atan2(dx, dz);
+        this.pos.x += Math.sin(this.angle) * this.speed * dt;
+        this.pos.z += Math.cos(this.angle) * this.speed * dt;
+        if (this.stateT > 4 && rng.chance(0.5)) { this.state = 'cover'; this.stateT = 0; this.cover = null; }
+      } else if (this.state === 'peek' && this.stateT > 1.2) {
+        this.state = 'chase'; this.stateT = 0;
+      }
+      this.angle = Math.atan2(dx, dz);
     }
-    if (tmin < bestT) {
-      // A ray starting inside a building (camera behind the player, clipped
-      // into a wall) must not block the shot: only count a real crossing.
-      if (tmin <= 0) return;
-      bestT = tmin;
-      bestKind = 'wall';
-      bestTarget = null;
+    city.collideCircle(this.pos, 0.6);
+    this.mesh.position.copy(this.pos);
+    this.mesh.rotation.y = this.angle || 0;
+    const swing = Math.sin(time * 10) * 0.4;
+    this.legL.rotation.x = swing; this.legR.rotation.x = -swing;
+    this.barMat.color.setHSL(0.02 + 0.33 * (this.health / this.maxHealth), 0.9, 0.55);
+    this.bar.scale.x = Math.max(0.05, this.health / this.maxHealth);
+    this.bar.lookAt(playerPos.x, 2.1, playerPos.z);
+    this.mesh.traverse((o) => { if (o.material && o.material.emissive) o.material.emissive.setHex(0x000000); });
+  }
+  // Returns true when this enemy fires this frame.
+  tryShoot(dt, playerPos) {
+    if (!this.alive) return false;
+    this.shootCooldown -= dt;
+    const dist = Math.hypot(playerPos.x - this.pos.x, playerPos.z - this.pos.z);
+    if (this.state === 'cover' && this.cover) return false;
+    if (dist > 55) return false;
+    if (this.shootCooldown <= 0) {
+      this.shootCooldown = this.kind === 'boss' ? 0.9 : 1.4 + Math.random() * 0.8;
+      return true;
     }
-  };
-  for (const b of G.city.colliders.boxes) rayBox(b);
-
-  for (const ped of G.peds) {
-    if (!ped.alive) continue;
-    testSphere(new THREE.Vector3(ped.pos.x, 1.2, ped.pos.z), 1.1, 'ped', ped);
+    return false;
   }
-  for (const car of G.police) {
-    if (!car.active || car.dead) continue;
-    testSphere(new THREE.Vector3(car.pos.x, 1, car.pos.z), 2.4, 'police', car);
-  }
-  for (const car of G.traffic) {
-    if (car.dead) continue;
-    testSphere(new THREE.Vector3(car.pos.x, 1, car.pos.z), 2.4, 'traffic', car);
-  }
-  for (const car of G.parked) {
-    if (car === G.car) continue;
-    testSphere(new THREE.Vector3(car.pos.x, 1, car.pos.z), 2.4, 'parked', car);
-  }
-
-  const end = origin.clone().addScaledVector(dir, bestT);
-  // Tracer + muzzle flash.
-  const pos = combat.tracer.geometry.attributes.position;
-  pos.setXYZ(0, muzzle.x, muzzle.y, muzzle.z);
-  pos.setXYZ(1, end.x, end.y, end.z);
-  pos.needsUpdate = true;
-  combat.tracer.visible = true;
-  combat.tracer.material.opacity = 0.9;
-  combat.tracerT = 0.09;
-  combat.flash.position.copy(muzzle).addScaledVector(dir, 0.5);
-  combat.flash.visible = true;
-  combat.flash.material.opacity = 1;
-  combat.flashT = 0.05;
-
-  const report = { kind: bestKind, range: bestT };
-  if (bestKind === 'ped') {
-    G.addWanted(1, 'Shot a pedestrian');
-    G.hud.toast('You shot a pedestrian! The heat is on.');
-    combat.lastShotPos = { x: bestTarget.pos.x, z: bestTarget.pos.z };
-    killPedestrian(bestTarget);
-  } else if (bestKind === 'police') {
-    bestTarget.health -= 34;
-    G.addWanted(1, 'Shot a police car');
-    combat.lastShotPos = { x: bestTarget.pos.x, z: bestTarget.pos.z };
-    if (bestTarget.health <= 0 && !bestTarget.dead) {
-      bestTarget.dead = true;
-      bestTarget.active = false;
-      bestTarget.mesh.visible = false;
-      G.hud.toast('Police car destroyed!');
-    }
-  } else if (bestKind === 'traffic') {
-    bestTarget.health -= 50;
-    if (!bestTarget.hitFlagged) {
-      bestTarget.hitFlagged = true;
-      G.addWanted(1, 'Shot a traffic car');
-    }
-    combat.lastShotPos = { x: bestTarget.pos.x, z: bestTarget.pos.z };
-    if (bestTarget.health <= 0) {
-      bestTarget.dead = true;
-      bestTarget.speed = 0;
-      G.hud.toast('You wrecked a traffic car!');
-    }
-  } else if (bestKind === 'parked') {
-    bestTarget.health -= 25;
-  } else {
-    combat.lastShotPos = { x: G.player.pos.x, z: G.player.pos.z };
-  }
-  return report;
 }
 
-export function stepCombat(G, dt) {
-  const c = G.combat;
-  c.cooldown = Math.max(0, c.cooldown - dt);
-  if (c.tracerT > 0) {
-    c.tracerT -= dt;
-    if (c.tracerT <= 0) {
-      c.tracer.visible = false;
-    } else {
-      c.tracer.material.opacity = c.tracerT / 0.09;
+export class Combat {
+  constructor(scene) {
+    this.scene = scene;
+    this.rng = makeRng(99);
+    this.enemies = [];
+    this.tracers = []; // {mesh, life}
+    this.sparks = []; // {mesh, vel, life}
+    this.muzzle = null;
+    this.muzzleT = 0;
+    const mGeo = new THREE.SphereGeometry(0.35, 8, 6);
+    this.muzzle = new THREE.Mesh(mGeo, new THREE.MeshBasicMaterial({ color: 0xffee88, transparent: true, opacity: 0 }));
+    scene.add(this.muzzle);
+  }
+  clearEnemies() {
+    for (const e of this.enemies) this.scene.remove(e.mesh);
+    this.enemies = [];
+  }
+  spawnEnemy(x, z, kind) {
+    const e = new Enemy(x, z, this.scene, this.rng, kind);
+    this.enemies.push(e);
+    return e;
+  }
+  spawnSquad(cx, cz, n, kind) {
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(this.spawnEnemy(cx + this.rng.range(-14, 14), cz + this.rng.range(-14, 14), kind));
+    return out;
+  }
+  aliveCount() { return this.enemies.filter((e) => e.alive).length; }
+  fireTracer(from, to, color) {
+    const dir = new THREE.Vector3().subVectors(to, from);
+    const len = dir.length();
+    const geo = new THREE.CylinderGeometry(0.03, 0.03, len, 5);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 }));
+    mesh.position.copy(from).addScaledVector(dir, 0.5);
+    mesh.lookAt(to);
+    mesh.rotateX(Math.PI / 2);
+    this.scene.add(mesh);
+    this.tracers.push({ mesh, life: 0.09 });
+  }
+  spawnSparks(pos, n) {
+    for (let i = 0; i < n; i++) {
+      const s = new THREE.Mesh(new THREE.SphereGeometry(0.07, 6, 4),
+        new THREE.MeshBasicMaterial({ color: 0xffc233 }));
+      s.position.copy(pos);
+      this.scene.add(s);
+      this.sparks.push({
+        mesh: s,
+        vel: new THREE.Vector3(this.rng.range(-3, 3), this.rng.range(1, 5), this.rng.range(-3, 3)),
+        life: 0.4,
+      });
     }
   }
-  if (c.flashT > 0) {
-    c.flashT -= dt;
-    if (c.flashT <= 0) c.flash.visible = false;
+  muzzleFlash(pos) {
+    this.muzzle.position.copy(pos);
+    this.muzzle.material.opacity = 0.95;
+    this.muzzleT = 0.06;
+    this.muzzle.scale.setScalar(1 + Math.random() * 0.8);
+  }
+  update(dt) {
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      const t = this.tracers[i];
+      t.life -= dt;
+      if (t.life <= 0) { this.scene.remove(t.mesh); this.tracers.splice(i, 1); }
+    }
+    for (let i = this.sparks.length - 1; i >= 0; i--) {
+      const s = this.sparks[i];
+      s.life -= dt;
+      s.vel.y -= 12 * dt;
+      s.mesh.position.addScaledVector(s.vel, dt);
+      if (s.life <= 0 || s.mesh.position.y < 0) { this.scene.remove(s.mesh); this.sparks.splice(i, 1); }
+    }
+    if (this.muzzleT > 0) {
+      this.muzzleT -= dt;
+      if (this.muzzleT <= 0) this.muzzle.material.opacity = 0;
+    }
   }
 }
