@@ -1,215 +1,130 @@
-// police.js — wanted-level pursuit. The number of police cars on the road
-// always matches the wanted stars (1-5). They chase, ram, and bust Dario
-// on foot when they touch him.
+// police.js — wanted 1-5 stars, PD interceptors that chase and ram, and a
+// police helicopter that joins at 4-5 stars. Busted or wasted = hospital, -$200.
 import * as THREE from 'three';
-import { createCarMesh, makeCar } from './vehicles.js';
-import { clamp, resolveCircle } from './util.js';
+import { Vehicle, buildVehicleMesh } from './vehicles.js';
+import { makeRng } from './rng.js';
 
-/** +1 when the target sits to the right of `heading`, -1 to the left. */
-function angleDiffSign(heading, target) {
-  const d = ((target - Math.PI - heading * 3) % (Math.PI * 2)) - Math.PI;
-  return d >= 0 ? 1 : -1;
-}
-
-export function createPolicePool(scene) {
-  const pool = [];
-  for (let i = 0; i < 5; i++) {
-    const mesh = createCarMesh(0x1a1a22, { police: true });
-    mesh.visible = false;
-    scene.add(mesh);
-    const car = makeCar(mesh, 0, 0, 0, {
-      isPolice: true, maxSpeed: 30, accel: 17,
-    });
-    car.active = false;
-    car.ramCooldown = 0;
-    car.flashT = 0;
-    car.avoidT = 0;
-    car.avoidSign = 1;
-    car.route = [];
-    car.routeT = 0;
-    pool.push(car);
+export class Police {
+  constructor(scene, city) {
+    this.scene = scene;
+    this.city = city;
+    this.rng = makeRng(31337);
+    this.cars = [];
+    this.heli = null;
+    this.heliRotor = null;
+    this.heliAngle = 0;
+    this.spawnT = 0;
+    this.lightT = 0;
   }
-  return pool;
-}
-
-/** Pick a road point 35-65m from the player, on a road, for a spawn. */
-function spawnPoint(G, rng) {
-  const roads = G.city.roads;
-  let best = null;
-  let bestScore = Infinity;
-  for (let tries = 0; tries < 12; tries++) {
-    const alongRoad = rng() < 0.5;
-    let x;
-    let z;
-    if (alongRoad) {
-      x = roads.xs[Math.floor(rng() * roads.xs.length)];
-      z = G.player.pos.z + (rng() < 0.5 ? -1 : 1) * (35 + rng() * 20);
-    } else {
-      z = roads.zs[Math.floor(rng() * roads.zs.length)];
-      x = G.player.pos.x + (rng() < 0.5 ? -1 : 1) * (35 + rng() * 20);
-    }
-    x = clamp(x, -175, 175);
-    z = clamp(z, -175, 175);
-    const d = Math.hypot(x - G.player.pos.x, z - G.player.pos.z);
-    const score = d < 35 ? 35 - d : d > 65 ? d - 65 : 0;
-    if (score < bestScore) {
-      bestScore = score;
-      best = { x, z };
-      if (score === 0) break;
-    }
+  wantedCars(wanted) {
+    if (wanted === 0) return 0;
+    if (wanted === 1) return 1;
+    if (wanted === 2) return 2;
+    if (wanted === 3) return 3;
+    return 4;
   }
-  return best ?? { x: G.player.pos.x + 50, z: G.player.pos.z };
-}
-
-/** The road intersection nearest a point. */
-function nearestIntersection(roads, x, z) {
-  let best = null;
-  let bestD = Infinity;
-  for (const ix of roads.xs) {
-    for (const iz of roads.zs) {
-      const d = Math.hypot(ix - x, iz - z);
-      if (d < bestD) {
-        bestD = d;
-        best = { x: ix, z: iz };
+  ensureHeli() {
+    if (this.heli) return;
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.4, 6.5),
+      new THREE.MeshLambertMaterial({ color: 0x1a1d24 }));
+    body.position.y = 0; g.add(body);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.0, 2.2),
+      new THREE.MeshLambertMaterial({ color: 0x9fd4ff }));
+    glass.position.set(0, 0.1, 2.4); g.add(glass);
+    const tail = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.8, 5),
+      new THREE.MeshLambertMaterial({ color: 0x1a1d24 }));
+    tail.position.set(0, 0.3, -5); g.add(tail);
+    const skid = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.15, 4.5),
+      new THREE.MeshLambertMaterial({ color: 0x333333 }));
+    skid.position.y = -1.0; g.add(skid);
+    this.heliRotor = new THREE.Mesh(new THREE.BoxGeometry(13, 0.12, 0.5),
+      new THREE.MeshLambertMaterial({ color: 0x222222 }));
+    this.heliRotor.position.y = 1.1; g.add(this.heliRotor);
+    const spot = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 2.2, 30, 10, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xfff6c0, transparent: true, opacity: 0.10, side: THREE.DoubleSide, depthWrite: false }));
+    spot.position.y = -16; g.add(spot);
+    g.position.set(0, 55, 0);
+    this.scene.add(g);
+    this.heli = g;
+  }
+  removeHeli() {
+    if (!this.heli) return;
+    this.scene.remove(this.heli);
+    this.heli = null; this.heliRotor = null;
+  }
+  spawnCarNear(playerPos) {
+    const a = this.rng.range(0, Math.PI * 2);
+    const d = 55;
+    const v = new Vehicle('police', playerPos.x + Math.sin(a) * d, playerPos.z + Math.cos(a) * d, a);
+    v.police = true;
+    this.scene.add(v.mesh);
+    this.cars.push(v);
+    return v;
+  }
+  update(dt, wanted, playerPos, playerSpeed, time, onBusted) {
+    // Keep the right number of pursuit cars.
+    const want = this.wantedCars(wanted);
+    this.spawnT -= dt;
+    while (this.cars.length < want && this.spawnT <= 0) {
+      this.spawnCarNear(playerPos);
+      this.spawnT = 1.2;
+    }
+    while (this.cars.length > want) {
+      const c = this.cars.pop();
+      this.scene.remove(c.mesh);
+    }
+    if (wanted >= 4) this.ensureHeli(); else this.removeHeli();
+    // Flash the light bars.
+    this.lightT += dt;
+    const phase = Math.floor(this.lightT * 6) % 2 === 0;
+    for (const c of this.cars) {
+      const lights = c.mesh.userData.lights;
+      if (lights) {
+        lights[0].material.color.setHex(phase ? 0xff2222 : 0x551111);
+        lights[1].material.color.setHex(phase ? 0x111155 : 0x2244ff);
       }
     }
+    // Pursuit: steer toward the player, ram when close.
+    for (const c of this.cars) {
+      const dx = playerPos.x - c.pos.x, dz = playerPos.z - c.pos.z;
+      const dist = Math.hypot(dx, dz);
+      const wantAngle = Math.atan2(dx, dz);
+      let diff = wantAngle - c.angle;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      c.angle += Math.max(-2.2 * dt, Math.min(2.2 * dt, diff));
+      const targetSpeed = dist > 90 ? 40 : (dist < 6 ? 18 : 34);
+      c.speed += (targetSpeed - c.speed) * Math.min(1, dt * 1.2);
+      const fwd = c.forward();
+      c.pos.addScaledVector(fwd, c.speed * dt);
+      this.city.collideCircle(c.pos, c.def.w);
+      c.mesh.position.copy(c.pos);
+      c.mesh.rotation.y = c.angle;
+      (c.mesh.userData.wheels || []).forEach((w) => { w.rotation.x += c.speed * dt * 2.6; });
+      if (dist < 3.4 && playerSpeed < 4 && onBusted) onBusted();
+    }
+    // Helicopter circles overhead, spotlight on the player.
+    if (this.heli) {
+      this.heliAngle += dt * 0.35;
+      const r = 55;
+      this.heli.position.set(
+        playerPos.x + Math.sin(this.heliAngle) * r,
+        22 + Math.sin(time * 0.7) * 2,
+        playerPos.z + Math.cos(this.heliAngle) * r);
+      this.heli.rotation.y = this.heliAngle + Math.PI;
+      if (this.heliRotor) this.heliRotor.rotation.y += dt * 22;
+    }
   }
-  return best;
-}
-
-/**
- * A two-leg Manhattan route along roads: from the intersection nearest the
- * car, along its row to the column of the intersection nearest the target,
- * then along that column to the target's intersection. Both legs run on
- * roads, so no building ever blocks the way.
- */
-function routeFor(roads, from, to) {
-  const a = nearestIntersection(roads, from.x, from.z);
-  const b = nearestIntersection(roads, to.x, to.z);
-  const route = [];
-  if (Math.hypot(a.x - b.x, a.z - b.z) > 4) {
-    route.push({ x: b.x, z: a.z });
+  clear() {
+    for (const c of this.cars) this.scene.remove(c.mesh);
+    this.cars = [];
+    this.removeHeli();
   }
-  route.push(b);
-  return route.filter((wp) => Math.hypot(wp.x - from.x, wp.z - from.z) > 6);
-}
-
-/** Keep active police count == wanted stars. */
-export function syncPolice(G, dt) {
-  const rng = G.rng;
-  let active = 0;
-  for (const car of G.police) if (car.active) active++;
-  // Spawn up to the wanted level.
-  for (const car of G.police) {
-    if (active >= G.wanted) break;
-    if (car.active) continue;
-    const sp = spawnPoint(G, rng);
-    car.pos.x = sp.x;
-    car.pos.z = sp.z;
-    car.heading = Math.atan2(G.player.pos.x - sp.x, -(G.player.pos.z - sp.z));
-    car.speed = 8;
-    car.health = 100;
-    car.dead = false;
-    car.active = true;
-    car.mesh.visible = true;
-    car.mesh.position.set(sp.x, 0, sp.z);
-    active++;
-  }
-  // Despawn extras when the heat drops.
-  for (const car of G.police) {
-    if (active <= G.wanted) break;
-    if (!car.active) continue;
-    car.active = false;
-    car.mesh.visible = false;
-    car.speed = 0;
-    active--;
-  }
-}
-
-export function stepPolice(G, dt) {
-  const playerPos = G.car ? { x: G.car.pos.x, z: G.car.pos.z } : { x: G.player.pos.x, z: G.player.pos.z };
-  for (const car of G.police) {
-    if (!car.active || car.dead) continue;
-    car.ramCooldown = Math.max(0, car.ramCooldown - dt);
-    const distToPlayer = Math.hypot(playerPos.x - car.pos.x, playerPos.z - car.pos.z);
-    // Far away: follow the road route. Close in: chase directly.
-    let target = playerPos;
-    if (distToPlayer > 24) {
-      car.routeT -= dt;
-      if (car.route.length === 0 || car.routeT <= 0) {
-        car.route = routeFor(G.city.roads, car.pos, playerPos);
-        car.routeT = 2.5;
-      }
-      if (car.route.length > 0) {
-        target = car.route[0];
-        if (Math.hypot(target.x - car.pos.x, target.z - car.pos.z) < 6) {
-          car.route.shift();
-          if (car.route.length > 0) target = car.route[0];
-          else target = playerPos;
-        }
-      }
-    } else {
-      car.route = [];
-    }
-    const dx = target.x - car.pos.x;
-    const dz = target.z - car.pos.z;
-    const dist = Math.hypot(dx, dz);
-    // Despawn a straggler that fell far behind; a fresh one spawns closer.
-    if (distToPlayer > 170) {
-      const sp = spawnPoint(G, G.rng);
-      car.pos.x = sp.x;
-      car.pos.z = sp.z;
-      car.speed = 10;
-      car.route = [];
-      car.mesh.position.set(sp.x, 0, sp.z);
-      continue;
-    }
-    const targetHeading = Math.atan2(dx, -dz);
-    // Unstick: after hitting a wall, steer around it for a moment instead
-    // of grinding straight into the building.
-    if (car.avoidT > 0) {
-      car.avoidT -= dt;
-      var steerTarget = targetHeading + car.avoidSign * 1.3;
-    } else {
-      var steerTarget = targetHeading;
-    }
-    const steer = clamp(((steerTarget - Math.PI - car.heading * 3) % (Math.PI * 2)) - Math.PI, -1, 1);
-    car.heading += steer * 2.6 * dt * clamp(Math.abs(car.speed) / 8, 0.3, 1);
-    car.speed = clamp(car.speed + car.accel * dt, 0, car.maxSpeed);
-    const nx = car.pos.x + Math.sin(car.heading) * car.speed * dt;
-    const nz = car.pos.z - Math.cos(car.heading) * car.speed * dt;
-    const trial = { x: nx, z: nz };
-    const hitWall = resolveCircle(trial, 1.6, G.city.colliders);
-    if (hitWall) {
-      car.speed *= 0.4;
-      if (car.avoidT <= 0) {
-        car.avoidT = 1.0;
-        car.avoidSign = angleDiffSign(car.heading, targetHeading);
-      }
-    }
-    car.pos.x = trial.x;
-    car.pos.z = trial.z;
-    car.mesh.position.set(car.pos.x, 0, car.pos.z);
-    car.mesh.rotation.y = Math.PI - car.heading;
-    // Flashing light bar.
-    car.flashT += dt;
-    const phase = Math.floor(car.flashT * 6) % 2 === 0;
-    if (car.mesh.userData.lightL) {
-      car.mesh.userData.lightL.material.color.setHex(phase ? 0xff2222 : 0x551111);
-      car.mesh.userData.lightR.material.color.setHex(phase ? 0x111155 : 0x2244ff);
-    }
-    // Ram the player's car, or bust Dario on foot.
-    if (distToPlayer < 3.2 && car.ramCooldown <= 0) {
-      car.ramCooldown = 1.2;
-      if (G.car) {
-        G.car.health -= 9;
-        car.health -= 4;
-        G.car.speed *= 0.6;
-        car.speed *= 0.5;
-        G.hud.toast('Police rammed your car!');
-      } else {
-        G.busted = true;
-      }
-    }
+  // Distance to the nearest pursuit car (for HUD / escape logic).
+  nearestDist(playerPos) {
+    let best = Infinity;
+    for (const c of this.cars) best = Math.min(best, Math.hypot(c.pos.x - playerPos.x, c.pos.z - playerPos.z));
+    return best;
   }
 }
