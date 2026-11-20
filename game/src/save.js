@@ -1,37 +1,37 @@
-// save.js — localStorage persistence for money, missions and best result.
-import { WORLD } from './palette.js';
-
-const KEY = 'solmar-sunset-save-v1';
-
-export function defaultSave() {
-  return { money: WORLD.startMoney, missionsDone: [false, false, false], best: 0 };
-}
+// save.js — progress persistence in localStorage: cash, missions done,
+// hidden packages found, best race/taxi times, weapon unlocks.
+const KEY = 'solmar-sunset-save-v2';
 
 export function loadSave() {
   try {
-    const raw = window.localStorage.getItem(KEY);
-    if (!raw) return defaultSave();
-    const parsed = JSON.parse(raw);
-    const save = defaultSave();
-    if (typeof parsed.money === 'number' && Number.isFinite(parsed.money)) {
-      save.money = Math.max(0, Math.round(parsed.money));
-    }
-    if (Array.isArray(parsed.missionsDone)) {
-      for (let i = 0; i < 3; i++) save.missionsDone[i] = parsed.missionsDone[i] === true;
-    }
-    if (typeof parsed.best === 'number' && Number.isFinite(parsed.best)) {
-      save.best = Math.max(0, Math.round(parsed.best));
-    }
-    return save;
-  } catch {
-    return defaultSave();
-  }
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (typeof data !== 'object' || !data) return null;
+    return data;
+  } catch (e) { return null; }
 }
 
-export function storeSave(save) {
+export function writeSave(state) {
   try {
-    window.localStorage.setItem(KEY, JSON.stringify(save));
-  } catch {
-    /* storage unavailable (private mode, headless): progress just isn't kept */
-  }
+    localStorage.setItem(KEY, JSON.stringify({
+      cash: Math.round(state.cash),
+      missionsDone: state.missionsDone.slice(),
+      packages: state.packagesFound.slice(),
+      bestRaceMs: state.bestRaceMs,
+      bestTaxi: state.bestTaxi,
+      totalEarned: Math.round(state.totalEarned || 0),
+      savedAt: Date.now(),
+    }));
+  } catch (e) { /* storage unavailable (private mode) — game still plays */ }
+}
+
+export function applySave(state, data) {
+  if (!data) return;
+  if (typeof data.cash === 'number') state.cash = data.cash;
+  if (Array.isArray(data.missionsDone)) state.missionsDone = data.missionsDone.slice(0, 5);
+  if (Array.isArray(data.packages)) state.packagesFound = data.packages.slice();
+  if (typeof data.bestRaceMs === 'number') state.bestRaceMs = data.bestRaceMs;
+  if (typeof data.bestTaxi === 'number') state.bestTaxi = data.bestTaxi;
+  if (typeof data.totalEarned === 'number') state.totalEarned = data.totalEarned;
 }
