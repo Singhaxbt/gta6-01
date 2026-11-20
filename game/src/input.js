@@ -1,85 +1,43 @@
-// input.js — keyboard + mouse state, with a synthetic injection API for tests.
+// input.js — keyboard + mouse state, edge-triggered "pressed" keys.
 export class Input {
-  constructor() {
+  constructor(canvas) {
     this.keys = new Set();
-    this.pressed = new Set(); // edge-triggered: consumed by takePressed
+    this.pressed = new Set();
+    this.mouseX = 0; this.mouseY = 0;
     this.mouseDown = false;
-    this.mousePressed = false;
-    this.anyKey = false;
-    this._onKeyDown = (e) => {
+    this.mouseClicked = false;
+    this.dragDX = 0; this.dragDY = 0;
+    this.dragging = false;
+    this.lastX = 0; this.lastY = 0;
+    window.addEventListener('keydown', (e) => {
       if (e.repeat) return;
       this.keys.add(e.code);
       this.pressed.add(e.code);
-      this.anyKey = true;
-    };
-    this._onKeyUp = (e) => this.keys.delete(e.code);
-    this._onMouseDown = (e) => {
-      if (e.button === 0) {
-        this.mouseDown = true;
-        this.mousePressed = true;
-        this.anyKey = true;
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab'].includes(e.code)) e.preventDefault();
+    });
+    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
+    window.addEventListener('blur', () => { this.keys.clear(); this.mouseDown = false; });
+    canvas.addEventListener('mousedown', (e) => {
+      this.mouseDown = true; this.mouseClicked = true; this.dragging = true;
+      this.lastX = e.clientX; this.lastY = e.clientY;
+    });
+    window.addEventListener('mouseup', () => { this.mouseDown = false; this.dragging = false; });
+    window.addEventListener('mousemove', (e) => {
+      this.mouseX = e.clientX; this.mouseY = e.clientY;
+      if (this.dragging) {
+        this.dragDX += e.clientX - this.lastX;
+        this.dragDY += e.clientY - this.lastY;
+        this.lastX = e.clientX; this.lastY = e.clientY;
       }
-    };
-    this._onMouseUp = (e) => {
-      if (e.button === 0) this.mouseDown = false;
-    };
-    this._onBlur = () => {
-      this.keys.clear();
-      this.mouseDown = false;
-    };
+    });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   }
-
-  attach() {
-    window.addEventListener('keydown', this._onKeyDown);
-    window.addEventListener('keyup', this._onKeyUp);
-    window.addEventListener('mousedown', this._onMouseDown);
-    window.addEventListener('mouseup', this._onMouseUp);
-    window.addEventListener('blur', this._onBlur);
-  }
-
-  down(code) {
-    return this.keys.has(code);
-  }
-
-  /** True once for the frame after the key went down (also for synthetic sets). */
-  takePressed(code) {
-    if (this.pressed.has(code)) {
-      this.pressed.delete(code);
-      return true;
-    }
-    return false;
-  }
-
-  takeMousePressed() {
-    const v = this.mousePressed;
-    this.mousePressed = false;
-    return v;
-  }
-
+  down(code) { return this.keys.has(code); }
+  wasPressed(code) { return this.pressed.has(code); }
+  axis(neg, pos) { return (this.keys.has(pos) ? 1 : 0) - (this.keys.has(neg) ? 1 : 0); }
   endFrame() {
     this.pressed.clear();
-    this.mousePressed = false;
-  }
-
-  // -- synthetic input (used by the ?shot staging hook and play-tests) --
-  setKey(code, isDown) {
-    if (isDown) {
-      if (!this.keys.has(code)) this.pressed.add(code);
-      this.keys.add(code);
-    } else {
-      this.keys.delete(code);
-    }
-    this.anyKey = true;
-  }
-
-  setMouse(isDown) {
-    if (isDown && !this.mouseDown) this.mousePressed = true;
-    this.mouseDown = isDown;
-  }
-
-  clearAll() {
-    this.keys.clear();
-    this.pressed.clear();
-    this.mouseDown = false;
+    this.mouseClicked = false;
+    this.dragDX = 0; this.dragDY = 0;
   }
 }
